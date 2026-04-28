@@ -1,11 +1,13 @@
 require("dotenv").config();
 const express = require("express");
+const path = require("path");
 const { createClient } = require("redis");
 const app = express();
 const username = process.env.REDIS_USERNAME;
 const password = process.env.REDIS_PASSWORD;
 const host = process.env.REDIS_SOCKET_HOST;
 const port = process.env.REDIS_SOCKET_PORT;
+const ipsPassword = process.env.IPS_PASSWORD;
 
 // if behind proxy (Render, Vercel, Nginx, Cloudflare)
 app.set("trust proxy", true);
@@ -23,22 +25,75 @@ client.connect();
 
 app.get("/", async (req, res) => {
   const ip = req.ip;
+  const now = new Date().toISOString();
 
-  // Store IP in Redis
   try {
-    await client.lPush("ips", ip);
-    await client.expire("ips", 3600); // expire after 1 hour
-    res.send("Your IP: " + ip);
+    // Check if IP already exists
+    const existingData = await client.hGet("ip_visits", ip);
+
+    if (existingData) {
+      // IP exists - update last visit and increment count
+      const data = JSON.parse(existingData);
+      data.lastSeen = now;
+      data.visits += 1;
+      await client.hSet("ip_visits", ip, JSON.stringify(data));
+    } else {
+      // New IP - create entry
+      const data = {
+        firstSeen: now,
+        lastSeen: now,
+        visits: 1,
+      };
+      await client.hSet("ip_visits", ip, JSON.stringify(data));
+    }
+
+    res.sendFile(path.join(__dirname, "got_you.gif"));
   } catch (err) {
     res.send("Error storing IP: " + err.message);
   }
 });
 
-// Bonus: view all stored IPs
+// View all stored IPs with details
 app.get("/ips", async (req, res) => {
+  res.send(`
+    <html>
+      <body style="font-family: Arial, sans-serif; padding: 24px;">
+        <h2>Enter password to view IPs</h2>
+        <form method="POST" action="/ips">
+          <input
+            type="password"
+            name="password"
+            placeholder="Password"
+            style="padding: 8px; width: 240px;"
+          />
+          <button type="submit" style="padding: 8px 12px;">Submit</button>
+        </form>
+      </body>
+    </html>
+  `);
+});
+
+app.use(express.urlencoded({ extended: true }));
+
+app.post("/ips", async (req, res) => {
+  const providedPassword = req.body.password;
+
+  if (!ipsPassword || providedPassword !== ipsPassword) {
+    return res.status(401).send("Unauthorized");
+  }
+
   try {
-    const ips = await client.lRange("ips", 0, -1);
-    res.json({ ips });
+    const allIps = await client.hGetAll("ip_visits");
+
+    const formatted = {};
+    for (const [ip, data] of Object.entries(allIps)) {
+      formatted[ip] = JSON.parse(data);
+    }
+
+    res.json({
+      totalUnique: Object.keys(formatted).length,
+      ips: formatted,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
